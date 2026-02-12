@@ -1,0 +1,21 @@
+# Ad Image Classifier - Зависимости
+# Установка: pip install -r requirements.txt
+
+# Компьютерное зрение и OCR
+easyocr>=1.7.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# NLP и трансформеры
+transformers>=4.35.0
+sentencepiece>=0.1.99
+
+# Вспомогательные библиотеки
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Опционально: для ускорения на CPU
+# intel-extension-for-pytorch
+
+# Для работы с видео (извлечение кадров)
+opencv-python>=4.8.0
