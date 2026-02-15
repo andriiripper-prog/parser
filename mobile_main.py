@@ -18,12 +18,107 @@ from adspower import get_ws_url
 from config import load_config
 from facebook_links import is_facebookish, pick_target_link_for_visit, resolve_lphp_to_external_url
 from graphql_parser import parse_graphql_payload, payload_looks_sponsored
+import re
+
+def normalize_ad_fields(ad_data):
+    """
+    Normalizes ad text and extracts structured links.
+    Returns modified ad_data with new fields:
+    - clean_text: human readable text without garbage/links
+    - text_link: display link found in text (e.g. regus.com)
+    - post_link: permalink to the post
+    - destination_link: actual target URL (CTA)
+    """
+    raw_text = ad_data.get("text") or ""
+    # print(f"      [DEBUG] Raw Text: {raw_text[:50]}...") # Optional debug
+    
+    # 1. Unicode Cleanup: Remove Private Use Areas (PUA) and Replacement Character
+    # Ranges: U+E000-U+F8FF, U+F0000-U+FFFFD, U+100000-U+10FFFD, \ufffd
+    clean_text = re.sub(r'[\ue000-\uf8ff]|[\U000f0000-\U000ffffd]|[\U00100000-\U0010fffd]|\ufffd', '', raw_text)
+    
+    # Normalize whitespace
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    # 2. Extract text_link (Display Link)
+    text_link = None
+    tokens = clean_text.split(' ')
+    
+    # Regex for domain-like token (no http, no www. prefix match, ends with TLD)
+    # e.g. "regus.com", "ontario.ca/ServiceOntario"
+    domain_re = re.compile(r'^(?!http|www\.)[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9-._]+)*$')
+    
+    for token in tokens:
+        t = token.rstrip('.,;!?')
+        if len(t) < 4: continue
+        # Exclude obvious metrics like 2.7K if they accidentally match (unlikely with dot requirement)
+        if domain_re.match(t):
+             text_link = t
+             break 
+    
+    # 3. Clean processed text
+    if text_link:
+        clean_text = clean_text.replace(text_link, '').replace('  ', ' ').strip()
+        
+    # Remove raw URLs from text
+    clean_text = re.sub(r'https?://\S+', '', clean_text).strip()
+    
+    # 4. Update fields
+    if clean_text:
+        ad_data['clean_text'] = clean_text
+    elif raw_text and len(raw_text) < 50: # If it was short and we cleaned it all, maybe revert?
+        # If we cleaned everything, it might have been just a link or domain.
+        # But if raw_text remains, we should probably keep it if it wasn't just PUA.
+        # Check if raw_text had PUA
+        if not re.search(r'[\ue000-\uf8ff]', raw_text):
+             ad_data['clean_text'] = raw_text # Fallback to raw if we over-cleaned valid text
+        else:
+             ad_data['clean_text'] = "-"
+    else:
+        ad_data['clean_text'] = "-"
+        
+    ad_data['text_link'] = text_link if text_link else "-"
+    
+    # Normalizing links - preserve existing values from JavaScript extraction
+    # Only set post_link if it doesn't exist or is empty
+    if not ad_data.get('post_link'):
+         ad_data['post_link'] = ""  # Keep as empty string, not None
+         
+    # For destination_link, preserve existing value or use 'link' field
+    existing_dest = ad_data.get('destination_link')
+    if not existing_dest or existing_dest == "-":
+        dest = ad_data.get('link')
+        if dest:  # Accept any link, not just http/https
+            ad_data['destination_link'] = dest
+        else:
+            ad_data['destination_link'] = "-"
+        
+    return ad_data
 from human import human_idle, human_scroll
 from media import save_media_for_ad
 from mobile_story_extract import extract_ads_via_js
 from story_extract import extract_feed_ads
 from telegram_client import send_ad_to_telegram, telegram_dedupe_key
 
+
+# Helper: Check for gibberish/junk text
+def is_gibberish_text(text):
+    if not text:
+        return False
+    if len(text) < 3:
+        return True
+    
+    # Check for high percentage of non-alphanumeric chars (excluding spaces/punctuation)
+    # allowed: letters, numbers, standard punctuation
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?-:;()\"'"
+    clean = "".join([c for c in text if c in allowed])
+    if len(clean) / len(text) < 0.5: # More than 50% junk/icons/weird chars
+        return True
+        
+    # Specific junk patterns
+    if text.strip() in ["Sponsored", "Like", "Comment", "Share", "Follow", "Join", "Install", "Play", "Apply"]:
+        return True
+        
+    return False
 
 def run_mobile_scraper():
     cfg = load_config()
@@ -111,7 +206,8 @@ def run_mobile_scraper():
 
         seen_ids = set()
         seen_sigs = set()
-        tg_sent = set()
+        tg_sent_keys = set()
+        tg_sent_count = 0
 
         collected = 0
         processed_graphql = 0
@@ -206,28 +302,66 @@ def run_mobile_scraper():
 
         def process_ad_from_dom(ad_data):
             """Process ad extracted from DOM (mobile_story_extract)"""
-            nonlocal collected, seen_sigs, tg_sent
+            nonlocal collected, seen_sigs, tg_sent_keys, tg_sent_count
+            
+            if ad_data.get("error"):
+                print(f"   ⚠️  JS Error in ad extraction: {ad_data['error']}")
+            
+            # Double check: if ad_label is "Organic" or missing, skip immediately
+            # This relies on the JS-side filtering update
+            if ad_data.get("ad_label") != "Sponsored":
+                 print(f"   ⚠️  Skipping organic post (safety check)")
+                 return
+            
+            # Generate unique ID for this processing attempt
+            ad_id = f"mob_{int(time.time())}_{random.randint(1000, 9999)}"
+            
+            # Debug: Show what JavaScript extracted
+            print(f"   [DEBUG] JS extracted - link: {ad_data.get('link', 'N/A')[:50] if ad_data.get('link') else 'N/A'}, post_link: {ad_data.get('post_link', 'N/A')[:50] if ad_data.get('post_link') else 'N/A'}")
+            
+            # Normalize text and fields before processing
+            ad_data = normalize_ad_fields(ad_data)
+            
+            # Debug: Show what normalize_ad_fields produced
+            print(f"   [DEBUG] After normalize - clean_text: {ad_data.get('clean_text', 'N/A')[:50]}, text_link: {ad_data.get('text_link', 'N/A')}, destination_link: {ad_data.get('destination_link', 'N/A')[:50] if ad_data.get('destination_link') else 'N/A'}")
             
             # Build signature for deduplication
             page_name = ad_data.get("page_name", "Unknown")
-            text = ad_data.get("text", "")
+            raw_text = ad_data.get("text", "")
+            text = raw_text # Fix: alias text for compatibility
+            clean_text = ad_data.get("clean_text", "-")
+            text_link = ad_data.get("text_link", "-")
+            
             link = ad_data.get("link", "")
+            post_link = ad_data.get("post_link", "")
+            destination_link = ad_data.get("destination_link", "-")
+            
+            # Define image_urls early
             image_urls = ad_data.get("image_urls", [])
             video_url = ad_data.get("video_url", "")
-            
-            # Create signature
-            sig = (
-                link 
-                or video_url 
-                or (image_urls[0] if image_urls else "")
-                or f"{page_name}|{text[:80]}"
-            )
+
+            # Filter junk/gibberish text
+            # If text is junk, we skip UNLESS there is a very strong link/visual
+            # Actually user asked to filter out junk messages entirely if text matches icons
+            if is_gibberish_text(clean_text) and is_gibberish_text(raw_text):
+                 print(f"   ⚠️  Skipping ad with gibberish/icon text: {clean_text[:20]}...")
+                 return
+
+            # Skip ads where text is just the page name (Header/Avatar capture)
+            if clean_text and page_name and clean_text.lower().strip() == page_name.lower().strip():
+                print(f"   ⚠️  Skipping ad where text equals page name: {page_name}")
+                return
+
+            # Deduplication signature based on content only (page_name + text)
+            # DO NOT include media_sig: Facebook shows same ads with different images
+            # (carousel ads, A/B testing), which would cause false duplicates
+            sig = f"{page_name}|{clean_text if clean_text != '-' else raw_text}"
             
             if sig in seen_sigs:
                 return
             seen_sigs.add(sig)
             
-            # Download media
+            # Download media with unique ID
             media_files = []
             if cfg["download_media"] and (image_urls or video_url):
                 # Convert to format expected by save_media_for_ad
@@ -236,7 +370,7 @@ def run_mobile_scraper():
                     [video_url] if video_url else [],
                     None,  # no DASH on mobile
                     cfg,
-                    ad_id="",
+                    ad_id=ad_id, # Use unique ID
                     request_ctx=context.request,
                 )
             
@@ -248,8 +382,11 @@ def run_mobile_scraper():
             
             if link:
                 print(f"      🔗 Found ad link: {link[:100]}")
+            if post_link:
+                print(f"      🔗 Found post link: {post_link[:100]}")
             
-            if link and "l.facebook.com/l.php" in link.lower():
+            # Handle both desktop (l.facebook.com) and mobile (lm.facebook.com) redirects
+            if link and ("/l.php" in link.lower() and ("l.facebook.com" in link or "lm.facebook.com" in link)):
                 # Resolve redirect
                 print(f"      🔄 Resolving redirect...")
                 info = resolve_lphp_to_external_url(context, link, timeout_ms=20000)
@@ -268,6 +405,12 @@ def run_mobile_scraper():
                 else:
                     vstatus = "no_external_link"
             
+            # Update destination_link with resolved external URL
+            if final_external:
+                destination_link = final_external
+            elif destination_link == "-" and text_link and text_link != "-":
+                destination_link = text_link
+            
             # Build ads library URL (fallback)
             ads_library_url = ""
             if page_name and page_name != "Unknown":
@@ -275,14 +418,14 @@ def run_mobile_scraper():
                 encoded_name = quote(page_name)
                 ads_library_url = f"https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&q={encoded_name}&search_type=page&media_type=all"
             
-            # Build ad object
+            # Build final ad object
             ad = {
-                "ad_id": "",
+                "ad_id": ad_id,
                 "ad_hash": "",
                 "ads_library_url": ads_library_url,
                 "page_name": page_name,
                 "text": text,
-                "urls": [link] if link else [],
+                "urls": [u for u in [link, post_link] if u],
                 "media_urls": media_files,
                 "image_urls": image_urls,
                 "video_urls": [video_url] if video_url else [],
@@ -297,50 +440,48 @@ def run_mobile_scraper():
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "source": "mobile_dom",
                 "ad_label": ad_data.get("ad_label", ""),
+                # Add normalized fields for Telegram
+                "clean_text": clean_text,
+                "text_link": text_link,
+                "post_link": post_link,
+                "destination_link": destination_link,
             }
-            
-            # Save to file BEFORE classification (like desktop)
-            with open(cfg["output_file"], "a", encoding="utf-8") as f:
-                f.write(json.dumps(ad, ensure_ascii=False) + "\n")
-            
-            # AI Classification check
-            should_send, vertical, confidence, matched_filter = should_send_ad(ad, media_files, cfg, classifier)
-            
-            # Add vertical metadata
-            ad["ai_vertical"] = vertical
-            ad["ai_confidence"] = confidence
-            ad["matched_filter"] = matched_filter
-            
-            # Telegram deduplication and send (like desktop)
-            tg_key = telegram_dedupe_key(ad)
-            if tg_key and tg_key in tg_sent:
-                pass  # Already sent
-            else:
-                if tg_key:
-                    tg_sent.add(tg_key)
-                send_ad_to_telegram(cfg, ad, media_files)
             
             collected += 1
             
-            # Show info (like desktop print format)
-            vertical_info = ""
-            filter_flag = ""
-            if vertical:
-                vertical_info = f" | {vertical} ({confidence:.0%})"
-                if matched_filter:
-                    filter_flag = " ✅ MATCHED FILTER"
+            # Save to file BEFORE classification (like desktop)
+            # with open(cfg["output_file"], "a", encoding="utf-8") as f:
+            #     f.write(json.dumps(ad, ensure_ascii=False) + "\n")
             
-            # Show both URLs
-            urls_display = []
-            if ads_library_url:
-                urls_display.append(f"📚 Ads Library")
-            if final_external:
-                urls_display.append(f"🔗 {final_external[:60]}")
-            
-            urls_out = " | ".join(urls_display) if urls_display else (text[:60]).replace("\n", " ") if text else ""
-            print(f"   🔥 FOUND (DOM): {page_name}{vertical_info}{filter_flag}")
-            if urls_out:
-                print(f"      {urls_out}")
+            should_send, vertical, confidence, matched_filter = should_send_ad(ad, media_files, cfg, classifier)
+
+            if should_send:
+                # Add AI classification info
+                ad["ai_vertical"] = vertical
+                ad["ai_confidence"] = confidence
+                ad["matched_filter"] = matched_filter
+                
+                # Fix confidence formatting for NoneType
+                conf_val = confidence if confidence is not None else 0.0
+                
+                print(f"   🔥 FOUND (DOM): {page_name} | {vertical} ({conf_val:.0%}){ ' ✅ MATCHED FILTER' if matched_filter else ''}")
+                if destination_link and destination_link != "-":
+                    print(f"      🔗 Link: {destination_link}")
+                else:
+                    print(f"      (No links found)")
+                
+                if cfg["telegram_send"]:
+                    # Check duplication before sending
+                    tg_key = telegram_dedupe_key(ad)
+                    if tg_key and tg_key in tg_sent_keys:
+                        print("      ⏩ Already sent to Telegram (Dedupe)")
+                    else:
+                        # CRITICAL FIX: Pass 'ad' object, NOT 'ad_data'
+                        if send_ad_to_telegram(cfg, ad, media_files):
+                            print("      🚀 Sent to Telegram")
+                            tg_sent_count += 1
+                            if tg_key:
+                                tg_sent_keys.add(tg_key)
 
         def slim(obj, depth=5, max_list=10, max_keys=70):
             if depth <= 0:
@@ -359,7 +500,7 @@ def run_mobile_scraper():
 
         def _handle_response(response):
             """GraphQL response handler - kept for debugging and fallback"""
-            nonlocal collected, processed_graphql, debug_dumps, stop_listen
+            nonlocal collected, processed_graphql, debug_dumps, stop_listen, tg_sent_count
             if stop_listen:
                 return
             try:
@@ -516,12 +657,13 @@ def run_mobile_scraper():
                     ad["matched_filter"] = matched_filter
 
                     tg_key = telegram_dedupe_key(ad)
-                    if tg_key and tg_key in tg_sent:
+                    if tg_key and tg_key in tg_sent_keys:
                         pass
                     else:
                         if tg_key:
-                            tg_sent.add(tg_key)
+                            tg_sent_keys.add(tg_key)
                         send_ad_to_telegram(cfg, ad, media_files)
+                        tg_sent_count += 1
 
                     collected += 1
 

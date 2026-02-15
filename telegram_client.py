@@ -117,22 +117,34 @@ def telegram_send_video(cfg: dict, path: Path, caption: str = "") -> bool:
 
 
 def telegram_dedupe_key(ad: dict) -> str:
-    final_external = (ad.get("final_external_url") or "").strip()
-    if final_external:
-        return final_external
-    ads_lib = (ad.get("ads_library_url") or "").strip()
-    urls = ad.get("urls") or []
-    post_url, _page_url, redirect_url, external_url = pick_post_page_redirect(urls)
-    key = post_url or external_url or redirect_url or ads_lib or (ad.get("ad_id") or "").strip()
-    if not key and urls:
-        key = urls[0]
-    if key:
-        return key
-    page_name = (ad.get("page_name") or "").strip()
-    text = ((ad.get("text") or "").strip())[:80]
-    if page_name or text:
-        return f"{page_name}|{text}"
-    return ""
+    """
+    Generate a robust deduplication key based on ad content.
+    Key components: Page Name + Text Hash + Destination Link + Post Link
+    NOTE: Does NOT include image URLs - Facebook shows same ads with different images
+    """
+    page_name = (ad.get("page_name") or "Unknown").strip()
+    
+    # Use clean text if available, otherwise raw text
+    text = (ad.get("clean_text") or ad.get("text") or "").strip()
+    # Hash text to avoid huge keys
+    import hashlib
+    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()[:10]
+    
+    # Links
+    dest = (ad.get("destination_link") or "").strip()
+    if dest == "-": dest = ""
+    
+    post = (ad.get("post_link") or "").strip()
+    if post == "-": post = ""
+    
+    # Construct key without image hash
+    # Facebook shows same ads with different images (carousel/A-B testing)
+    # So we deduplicate based on content only
+    parts = [page_name, text_hash, dest, post]
+    key = "|".join(parts)
+    
+    # Return md5 of the whole thing for cleaner storage
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
 def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
@@ -148,13 +160,20 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
     attached = final_external or external_url or redirect_url
 
     lines = []
-    post_link = ad.get("post_link") or ""  # Specific post link from mobile scraper
+    # Normalized fields (from mobile_main.py)
+    clean_text = ad.get("clean_text", "-")
+    text_link = ad.get("text_link", "-")
+    post_link = ad.get("post_link") or post_url or "-" 
+    destination_link = ad.get("destination_link", "-")
     
+    # 1. Name
     if page_name:
         lines.append(f"Name: {page_name}")
+        
+    # 2. Geo
     lines.append("Geo: Canada")
     
-    # Add vertical info if available
+    # 3. Vertical details
     ai_vertical = ad.get("ai_vertical")
     ai_confidence = ad.get("ai_confidence")
     matched_filter = ad.get("matched_filter", False)
@@ -162,15 +181,23 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
     if ai_vertical and ai_confidence:
         filter_flag = " ✅" if matched_filter else ""
         lines.append(f"Vertical: {ai_vertical} ({ai_confidence:.0%}){filter_flag}")
+
+    # 4. Text (Cleaned)
+    lines.append(f"\nText:\n{clean_text}")
+
+    # 5. Links Section
+    # Link in ad: <destination_link or text_link or "-">
+    # Post: <post_link or "-">
+    # Ads Library: <ads_library_link>
     
-    if text:
-        lines.append(f"\nText:\n{text}")
-    if ads_lib:
-        lines.append(f"Ads Library: {ads_lib}")
-    elif post_url:
-        lines.append(f"Post: {post_url}")
-    if attached:
-        lines.append(f"Link: {attached}")
+    link_in_ad = destination_link if destination_link != "-" else text_link
+    
+    lines.append(f"Link in ad: {link_in_ad}")
+    lines.append(f"Post: {post_link}")
+    
+    # Ads Library link removed as per user request
+    # if ads_lib:
+    #     lines.append(f"Ads Library: {ads_lib}")
 
     caption = "\n".join(lines).strip()
     if not caption:
@@ -180,38 +207,47 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
 
     ad_id = (ad.get("ad_id") or "").strip()
 
-    vid_path = resolve_saved_video_path(
-        ad.get("video_urls") or [],
-        cfg,
-        (ad.get("dash_video_url") or "").strip(),
-        ad_id,
-    )
-    img_path = resolve_saved_image_path(ad.get("image_urls") or [], cfg, ad_id)
-
-    # fallback: use returned media_files if saved paths not resolved
-    if not vid_path and media_files:
+    # CRITICAL FIX: Prioritize media_files (already filtered by JavaScript)
+    # over resolve_saved_* functions which may incorrectly re-filter and reject valid images
+    vid_path = None
+    img_path = None
+    
+    # 1. First, try to use media_files directly (for mobile ads, JS already filtered correctly)
+    if media_files:
+        # Look for video in media_files first
         for p in media_files:
             if str(p).lower().endswith((".mp4", ".m4v")):
                 vp = Path(p)
                 if vp.exists() and vp.stat().st_size > 0:
                     vid_path = vp
                     break
-
-    if media_files and not img_path:
-        best_img = None
-        for p in media_files:
-            sp = str(p)
-            if not sp.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
-                continue
-            ip = Path(p)
-            if not ip.exists() or ip.stat().st_size <= 0:
-                continue
-            # Prefer larger files (higher quality)
-            cand = (ip.stat().st_size, ip)
-            if best_img is None or cand[0] > best_img[0]:
-                best_img = cand
-        if best_img:
-            img_path = best_img[1]
+        
+        # Look for image in media_files first
+        if not img_path:
+            # For mobile ads, JavaScript already selected the correct image
+            # Just take the first valid image file (don't search for largest)
+            for p in media_files:
+                sp = str(p)
+                if not sp.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+                    continue
+                ip = Path(p)
+                if not ip.exists() or ip.stat().st_size <= 0:
+                    continue
+                # Found first valid image - use it
+                img_path = ip
+                break
+    
+    # 2. Fallback: use resolve_saved_* functions (for GraphQL ads or if media_files is empty)
+    if not vid_path:
+        vid_path = resolve_saved_video_path(
+            ad.get("video_urls") or [],
+            cfg,
+            (ad.get("dash_video_url") or "").strip(),
+            ad_id,
+        )
+    
+    if not img_path:
+        img_path = resolve_saved_image_path(ad.get("image_urls") or [], cfg, ad_id)
 
     if vid_path:
         ok = telegram_send_video(cfg, vid_path, caption=caption)
