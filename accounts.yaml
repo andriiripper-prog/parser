@@ -1,0 +1,83 @@
+accounts:
+  # ── Canada Desktop ───────────────────────────────────────────────────────
+  - id: "k1951qx9"
+    name: "Desktop 1"
+    type: "desktop"
+    geo: "canada"
+    enabled: true
+
+  - id: "k19iyre3"
+    name: "Desktop 2"
+    type: "desktop"
+    geo: "canada"
+    enabled: true
+
+  - id: "k19s1htj"
+    name: "Desktop 3"
+    type: "desktop"
+    geo: "canada"
+    enabled: true
+
+  - id: "k19rrm15"
+    name: "Desktop 4"
+    type: "desktop"
+    geo: "canada"
+    enabled: true
+
+  # ── Canada Mobile ────────────────────────────────────────────────────────
+  - id: "k1951vv8"
+    name: "Mobile 1"
+    type: "mobile"
+    geo: "canada"
+    enabled: true
+
+  # ── Turkey Mobile ────────────────────────────────────────────────────────
+  - id: "k1a67owr"
+    name: "Mobile TR 1"
+    type: "mobile"
+    geo: "turkey"
+    enabled: true
+
+  - id: "k1a691il"
+    name: "Mobile TR 2"
+    type: "mobile"
+    geo: "turkey"
+    enabled: true
+
+  - id: "k1aba2hb"
+    name: "Mobile TR 3"
+    type: "mobile"
+    geo: "turkey"
+    enabled: true
+
+  # ── Turkey Desktop ───────────────────────────────────────────────────────
+  - id: "k1aba1l5"
+    name: "Desktop TR 1"
+    type: "desktop"
+    geo: "turkey"
+    enabled: true
+
+  - id: "k1aba08w"
+    name: "Desktop TR 2"
+    type: "desktop"
+    geo: "turkey"
+    enabled: true
+
+  # ── Belgium Desktop ──────────────────────────────────────────────────────
+  - id: "k1953mfp"
+    name: "Desktop BE 1"
+    type: "desktop"
+    geo: "belgium"
+    enabled: true
+
+  - id: "k1953u4o"
+    name: "Desktop BE 2"
+    type: "desktop"
+    geo: "belgium"
+    enabled: true
+
+settings:
+  max_concurrent_browsers: 2
+  check_interval: 30
+  session_duration_minutes: 120
+  break_duration_minutes: 0

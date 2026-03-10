@@ -621,9 +621,13 @@ def best_image_from_media(media: dict):
     if not candidates:
         return "", 0
 
+    # Prioritize:
+    # 1. High Priority (original/full image)
+    # 2. Score (Resolution)
+    # 3. Non-Cropped (only if priority/score are similar)
     candidates.sort(key=lambda x: (x["cropped"], -x["priority"], -x["score"]))
-    best = candidates[0]
-    return best["url"], best["score"]
+    candidate = candidates[0]
+    return candidate["url"], candidate["score"]
 
 
 def extract_images_from_story(story: dict, cfg: dict, max_items=8):
@@ -692,6 +696,7 @@ def extract_images_from_story(story: dict, cfg: dict, max_items=8):
         url = item["url"]
         score = item["score"]
 
+        # Only filter by size if we actually have a score/dim
         if score > 0 and score < min_area:
             continue
 
@@ -728,7 +733,8 @@ def extract_media_from_story(story: dict, cfg: dict):
                 continue
             score = image_score_from_url(u)
             w, h = image_dims_from_url(u)
-            if score == 0 and not is_cropped_fb_image_url(u):
+            # Allow images with no score (might be clean URLs) if not explicitly cropped
+            if score == 0:
                 extra_imgs.append(u)
             elif (score and score >= min_area) or (w >= min_w and h >= min_h):
                 extra_imgs.append(u)
@@ -775,8 +781,7 @@ def resolve_saved_image_path(image_urls, cfg: dict, ad_id: str):
             continue
         if is_avatar_or_icon_url(u):
             continue
-        if is_cropped_fb_image_url(u):
-            continue
+        # Allow cropped images if they are in the 'image_urls' list (which is already sorted/filtered)
         score = image_score_from_url(u)
         candidates.append((-score, -len(u), u))
 

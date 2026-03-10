@@ -13,6 +13,56 @@ from media import (
 
 _WORD_URL_RE = re.compile(r"https?://[^\s\"']+")
 
+# Ключи в GraphQL-объекте story, которые содержат ЧУЖОЙ контент
+# (соседние органические посты, прикреплённые истории и т.д.)
+_SKIP_STORY_KEYS = {
+    "attached_story",
+    "attached_story_attachment",
+    "adjacent_stories",
+    "related_stories",
+    "comet_sections",
+    "feedback",
+    "seen_state",
+    "unified_reactors",
+    "timeline_context_items",
+    "subattachments",        # карусель — берём только основной текст
+    "debug_info",
+    "contextual_info",
+}
+
+
+def collect_strings_from_story(node, limit=400):
+    """
+    Собирает строки из story-ноды, ПРОПУСКАЯ ключи,
+    которые обычно содержат чужой органический контент.
+    """
+    strings = []
+
+    def walk(n, depth=0):
+        if len(strings) >= limit:
+            return
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if str(k).lower() in _SKIP_STORY_KEYS:
+                    continue
+                walk(v, depth + 1)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v, depth + 1)
+        elif isinstance(n, str):
+            strings.append(n)
+
+    walk(node)
+    return strings
+
+BAD_STRINGS = {
+    "sponsored", "suggested for you", "paid for by", "advertisement",
+    "like", "comment", "share", "follow", "join", "install", "play", "apply", "sign up",
+    "learn more", "shop now", "watch more", "send message", "whatsapp",
+    "about this content", "why am i seeing this ad",
+    "hide ad", "report ad", "save link", "turn on notifications"
+}
+
 
 def _is_valid_text(text: str) -> bool:
     """
@@ -63,16 +113,42 @@ def _is_valid_text(text: str) -> bool:
     return True
 
 
-def pick_best_text(strings):
+def pick_best_text(strings, exclude_text=None):
     """
     Select the best text from collected strings.
-    Improved version with more flexible filtering.
+    Improved version with more flexible filtering and exclusion logic.
+    Argument 'exclude_text' allows filtering out text that matches page name.
     """
     candidates = []
+    
+    exclude_lower = exclude_text.lower().strip() if exclude_text else ""
+    
     for s in strings:
         if not isinstance(s, str):
             continue
         text = s.strip()
+        text_lower = text.lower()
+        
+        # Filter bad strings (exact match or contained if short)
+        is_bad = False
+        for bad in BAD_STRINGS:
+            if bad == text_lower:
+                is_bad = True
+                break
+            if len(text) < 20 and bad in text_lower:
+                is_bad = True
+                break
+        if is_bad:
+            continue
+            
+        # Filter excluded text (e.g. page name)
+        if exclude_lower:
+            # Exact match
+            if text_lower == exclude_lower:
+                continue
+            # Contained match for short texts (e.g. "Belfius" in "Belfius Insurance")
+            if len(text) < 50 and (text_lower in exclude_lower or exclude_lower in text_lower):
+                continue
         
         # Minimum length check (reduced from 20 to 10)
         if len(text) < 10:
@@ -113,9 +189,21 @@ def pick_best_text(strings):
     
     if not candidates:
         return ""
-    
-    # Return longest text (by word count, then character count)
-    return max(candidates, key=lambda t: (len(t.split()), len(t)))
+
+    # Возвращаем ПЕРВЫЙ достаточно длинный кандидат (не самый длинный).
+    # Рекламный текст в GraphQL идёт раньше соседнего органического контента.
+    # Исключение: если первый кандидат очень короткий (< 30 символов) —
+    # берём следующий длиннее, но не более чем в 3 раза длиннее первого.
+    first = candidates[0]
+    if len(first) >= 30:
+        return first
+
+    # Первый текст очень короткий — ищем немного длиннее, но без фанатизма
+    for c in candidates[1:]:
+        if len(c) >= 30 and len(c) <= len(first) * 4 + 200:
+            return c
+
+    return first
 
 
 def find_urls(strings, limit=12):
@@ -215,8 +303,27 @@ def extract_feed_ads(payload, cfg: dict):
         return False
 
     def extract_one(story: dict):
-        strings = collect_strings(story, limit=900)
-        text = pick_best_text(strings)
+        # 1. Extract Page Name FIRST
+        page_name = get_page_name_from_story(story)
+        
+        # 2. Collect strings and pick best text, EXCLUDING page name
+        # Используем collect_strings_from_story (пропускает ключи с органикой)
+        strings = collect_strings_from_story(story, limit=400)
+        text = pick_best_text(strings, exclude_text=page_name)
+        
+        # Clean text (remove URLs, emojis) - similar to mobile_main.py
+        import re
+        clean_text = text
+        if clean_text:
+            # Remove emojis and special unicode
+            clean_text = re.sub(r'[\ue000-\uf8ff]|[\U000f0000-\U000ffffd]|[\U00100000-\U0010fffd]|\ufffd', '', clean_text)
+            # Remove URLs
+            clean_text = re.sub(r'https?://\S+', '', clean_text).strip()
+            # Normalize whitespace
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        
+        if not clean_text:
+            clean_text = "-"
 
         urls_all = find_urls(strings, limit=20)
         urls_all += collect_urls_from_keys(story, limit=40)
@@ -231,8 +338,6 @@ def extract_feed_ads(payload, cfg: dict):
             ad_id, ad_hash = extract_ad_id_from_urls(urls_deduped)
         else:
             _, ad_hash = extract_ad_id_from_urls(urls_deduped)
-
-        page_name = get_page_name_from_story(story)
 
         landing_urls = []
         for u in urls_deduped:
@@ -263,6 +368,7 @@ def extract_feed_ads(payload, cfg: dict):
             "ads_library_url": ads_library_url_from_ad_id(ad_id),
             "page_name": page_name,
             "text": text,
+            "clean_text": clean_text,
             "urls": landing_urls[:12],
             "media_urls": media_urls,
             "image_urls": image_urls,
@@ -314,4 +420,21 @@ def extract_feed_ads(payload, cfg: dict):
                 walk(v)
 
     walk(payload)
-    return ads
+    
+    # Deduplicate ads by content signature to prevent duplicate extraction
+    # (can happen if same story matches multiple extraction patterns)
+    deduped = []
+    seen_sigs = set()
+    for ad in ads:
+        # Build signature from page_name, text, and urls
+        sig_parts = [
+            (ad.get("page_name") or "").strip(),
+            (ad.get("text") or "").strip()[:100],
+            str(ad.get("ad_id", ""))
+        ]
+        sig = "|".join(sig_parts)
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            deduped.append(ad)
+    
+    return deduped

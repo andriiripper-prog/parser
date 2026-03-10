@@ -37,6 +37,7 @@ def telegram_get_latest_chat_id(cfg: dict) -> str:
 def telegram_api(cfg: dict, method: str, data: dict, files=None, retry_on_fail: bool = True) -> bool:
     token = cfg.get("telegram_bot_token") or ""
     if not token:
+        print("❌ Telegram: No bot token configured")
         return False
 
     if "chat_id" not in data or not data.get("chat_id"):
@@ -49,11 +50,12 @@ def telegram_api(cfg: dict, method: str, data: dict, files=None, retry_on_fail: 
             data["chat_id"] = chat_id
 
     if not data.get("chat_id"):
+        print("❌ Telegram: No chat_id configured or found")
         return False
 
     try:
         url = f"https://api.telegram.org/bot{token}/{method}"
-        resp = requests.post(url, data=data, files=files, timeout=cfg.get("telegram_timeout", 20))
+        resp = requests.post(url, data=data, files=files, timeout=cfg.get("telegram_timeout", 60))
         js = {}
         try:
             js = resp.json()
@@ -61,19 +63,21 @@ def telegram_api(cfg: dict, method: str, data: dict, files=None, retry_on_fail: 
             js = {}
         if js.get("ok") is True:
             return True
+        
+        desc = str(js.get("description") or "")
         if retry_on_fail:
-            desc = str(js.get("description") or "")
             if "chat not found" in desc.lower() or "bot can't send messages" in desc.lower():
                 chat_id = telegram_get_latest_chat_id(cfg)
                 if chat_id:
                     cfg["telegram_chat_id"] = chat_id
                     data["chat_id"] = chat_id
                     return telegram_api(cfg, method, data, files=files, retry_on_fail=False)
-        desc = str(js.get("description") or "")
+        
         if desc:
-            print(f"TG send failed ({method}): {desc}")
+            print(f"❌ TG send failed ({method}): {desc}")
         return False
-    except Exception:
+    except Exception as e:
+        print(f"❌ Telegram API error ({method}): {e}")
         return False
 
 
@@ -157,21 +161,56 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
     post_url, _page_url, redirect_url, external_url = pick_post_page_redirect(urls)
     ads_lib = (ad.get("ads_library_url") or "").strip()
     final_external = (ad.get("final_external_url") or "").strip()
-    attached = final_external or external_url or redirect_url
 
     lines = []
     # Normalized fields (from mobile_main.py)
     clean_text = ad.get("clean_text", "-")
     text_link = ad.get("text_link", "-")
-    post_link = ad.get("post_link") or post_url or "-" 
-    destination_link = ad.get("destination_link", "-")
+    post_link = ad.get("post_link") or post_url or "-"
+    
+    # CRITICAL: destination_link должна быть ВНЕШНЯЯ ссылка (не Facebook ссылка)
+    # Приоритет: final_external > external_url > redirect_url > первый non-facebook URL
+    destination_link = "-"
+    if final_external and final_external.startswith("http"):
+        destination_link = final_external
+    elif external_url and external_url.startswith("http"):
+        destination_link = external_url
+    elif redirect_url and redirect_url.startswith("http"):
+        destination_link = redirect_url
+    else:
+        # Fallback: найти первый non-facebook URL из urls
+        for u in urls:
+            if isinstance(u, str) and u.startswith("http"):
+                from facebook_links import is_facebookish
+                if not is_facebookish(u):
+                    destination_link = u
+                    break
+    
+    # --- FILTER EMPTY ADS ---
+    # Если нет текста и нет ссылок - скипаем (это "шляпа")
+    has_text = clean_text and clean_text != "-" and len(clean_text) > 2
+    has_dest = destination_link and destination_link != "-"
+    has_post = post_link and post_link != "-"
+    
+    if not has_text and not has_dest and not has_post:
+        print(f"   ⚠️  Skipping empty ad (no text, no links)")
+        return False
+    # ------------------------
     
     # 1. Name
     if page_name:
         lines.append(f"Name: {page_name}")
         
-    # 2. Geo
-    lines.append("Geo: Canada")
+    # 2. Geo + Account
+    geo_label = cfg.get("account_geo", "Canada").title()
+    account_id = cfg.get("account_id", "")
+    account_name = cfg.get("account_name", "")
+    geo_str = f"Geo: {geo_label}"
+    if account_name:
+        geo_str += f" | Account: {account_name}"
+    elif account_id:
+        geo_str += f" | Account: {account_id}"
+    lines.append(geo_str)
     
     # 3. Vertical details
     ai_vertical = ad.get("ai_vertical")
@@ -186,13 +225,20 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
     lines.append(f"\nText:\n{clean_text}")
 
     # 5. Links Section
-    # Link in ad: <destination_link or text_link or "-">
-    # Post: <post_link or "-">
-    # Ads Library: <ads_library_link>
+    post_id = ad.get("post_id")
+    if post_id:
+        lines.append(f"Post ID: {post_id}")
+        
+    # Auto-Registration Info
+    reg_email = ad.get("reg_email")
+    reg_password = ad.get("reg_password")
     
-    link_in_ad = destination_link if destination_link != "-" else text_link
+    if reg_email and reg_email != "-":
+        lines.append(f"Auto-Reg: ✅ {reg_email}")
+        if reg_password and reg_password != "-":
+            lines.append(f"Pass: {reg_password}")
     
-    lines.append(f"Link in ad: {link_in_ad}")
+    lines.append(f"Link in ad: {destination_link}")
     lines.append(f"Post: {post_link}")
     
     # Ads Library link removed as per user request
@@ -226,6 +272,10 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
         if not img_path:
             # For mobile ads, JavaScript already selected the correct image
             # Just take the first valid image file (don't search for largest)
+            # Find the largest image file in media_files
+            largest_size = -1
+            best_img = None
+            
             for p in media_files:
                 sp = str(p)
                 if not sp.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
@@ -233,9 +283,14 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
                 ip = Path(p)
                 if not ip.exists() or ip.stat().st_size <= 0:
                     continue
-                # Found first valid image - use it
-                img_path = ip
-                break
+                
+                size = ip.stat().st_size
+                if size > largest_size:
+                    largest_size = size
+                    best_img = ip
+            
+            if best_img:
+                img_path = best_img
     
     # 2. Fallback: use resolve_saved_* functions (for GraphQL ads or if media_files is empty)
     if not vid_path:
@@ -250,15 +305,22 @@ def send_ad_to_telegram(cfg: dict, ad: dict, media_files=None) -> bool:
         img_path = resolve_saved_image_path(ad.get("image_urls") or [], cfg, ad_id)
 
     if vid_path:
+        print(f"   📹 Found video: {vid_path.name}, sending...")
         ok = telegram_send_video(cfg, vid_path, caption=caption)
         if ok:
+            print(f"   ✅ Video sent successfully")
             return True
+        print(f"   ⚠️  Video send failed (check logs for reason), trying text fallback")
         return telegram_send_message(cfg, caption)
 
     if img_path:
+        print(f"   🖼️  Found image: {img_path.name}, sending...")
         ok = telegram_send_photo(cfg, img_path, caption=caption)
         if ok:
+            print(f"   ✅ Photo sent successfully")
             return True
+        print(f"   ⚠️  Photo send failed (check logs for reason), trying text fallback")
         return telegram_send_message(cfg, caption)
 
+    print(f"   📝 No media, sending text-only message")
     return telegram_send_message(cfg, caption)

@@ -36,30 +36,47 @@ DEFAULT_CONFIG = {
     "media_dir": "media",
     "download_media": True,
     "download_timeout": 25,
-    "max_media_per_ad": 12,
+    "max_media_per_ad": 2,
     "max_bytes_per_file": 80 * 1024 * 1024,  # 80MB safety
-    "max_images_per_ad": 12,
+    "max_images_per_ad": 1,
     "max_videos_per_ad": 1,
     "prefer_dash_full_hd": True,
     "keep_audio_separate_if_no_ffmpeg": True,
 
     # image quality filters
-    "min_image_area": 600,
-    "min_image_width": 600,
-    "min_image_height": 36000,
+    "min_image_area": 60000,
+    "min_image_width": 300,
+    "min_image_height": 200,
 
     # AI classification
     "classify_images": True,
-    "filter_verticals": ["Crypto & Investment", "Gambling & Casino", "AI & Technology", "Celebrities & Influencers"],
-    "min_vertical_confidence": 0.6,
+    "filter_verticals": [
+        "Fake News & Media Scandals",
+        "Celebrity Tragedy & Legal Drama",
+        "Government Payouts & Allowances",
+        "Financial Secrets & Wealth Exposé",
+        "Crypto & Investment Offers",
+    ],
+    "min_vertical_confidence": 0.57,   # >= 57% — принимаем
     "classifier_model": "valhalla/distilbart-mnli-12-1",
     "ocr_languages": ["en", "ru"],
+
+
+
+    # like behavior (anti-bot humanization)
+    "like_enabled": True,    # master switch for random liking
+    "like_chance": 0.06,     # probability (0–1) of liking per scroll cycle
+    "like_min_delay": 1.2,   # seconds before clicking Like (min)
+    "like_max_delay": 3.5,   # seconds before clicking Like (max)
+
+    # auto-registration on ad landing pages
+    "auto_register": True,   # enabled by default
 
     # telegram
     "telegram_bot_token": "",
     "telegram_chat_id": "",
     "telegram_send": True,
-    "telegram_timeout": 20,
+    "telegram_timeout": 60,
 }
 
 # ================= Sponsored variants (EN) =================
@@ -146,6 +163,7 @@ def load_config(overrides: dict | None = None) -> dict:
     cfg["telegram_chat_id"] = os.getenv("TELEGRAM_CHAT_ID", cfg["telegram_chat_id"])
     cfg["telegram_send"] = env_bool("TELEGRAM_SEND", cfg["telegram_send"])
     cfg["download_media"] = env_bool("DOWNLOAD_MEDIA", cfg["download_media"])
+    cfg["auto_register"] = env_bool("AUTO_REGISTER", cfg["auto_register"])
 
     cfg["scroll_count"] = env_int("SCROLL_COUNT", cfg["scroll_count"])
     cfg["max_graphql_responses"] = env_int("MAX_GRAPHQL_RESPONSES", cfg["max_graphql_responses"])

@@ -4,3 +4,5 @@ __pycache__/
 media/
 sponsored_ads_graphql.jsonl
 graphql_debug_dump.jsonl
+logs/
+rotation_state.json

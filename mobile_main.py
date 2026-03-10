@@ -15,6 +15,7 @@ except ImportError:
 
 from ad_classifier import AdImageClassifier
 from adspower import get_ws_url
+from auto_register import try_auto_register # NEW
 from config import load_config
 from facebook_links import is_facebookish, pick_target_link_for_visit, resolve_lphp_to_external_url
 from graphql_parser import parse_graphql_payload, payload_looks_sponsored
@@ -93,7 +94,7 @@ def normalize_ad_fields(ad_data):
             ad_data['destination_link'] = "-"
         
     return ad_data
-from human import human_idle, human_scroll
+from human import human_idle, human_scroll, human_like_post
 from media import save_media_for_ad
 from mobile_story_extract import extract_ads_via_js
 from story_extract import extract_feed_ads
@@ -115,16 +116,38 @@ def is_gibberish_text(text):
         return True
         
     # Specific junk patterns
-    if text.strip() in ["Sponsored", "Like", "Comment", "Share", "Follow", "Join", "Install", "Play", "Apply"]:
+    if text.strip() in ["Sponsored", "Gesponsord", "Sponsorlu", "Like", "Comment", "Share", "Follow", "Join", "Install", "Play", "Apply"]:
         return True
         
     return False
 
-def run_mobile_scraper():
-    cfg = load_config()
+def _enrich_cfg_with_account_info(cfg):
+    """Read accounts.yaml and inject geo + name into cfg based on current user_id."""
+    try:
+        import yaml
+        accounts_file = Path(__file__).parent / "accounts.yaml"
+        if accounts_file.exists():
+            with open(accounts_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            for acc in (data.get("accounts") or []):
+                if acc.get("id") == cfg.get("user_id"):
+                    cfg["account_geo"] = acc.get("geo", "canada")
+                    cfg["account_name"] = acc.get("name", "")
+                    cfg["account_id"] = acc.get("id", "")
+                    break
+    except Exception as e:
+        print(f"⚠️ Could not load account geo info: {e}")
+
+
+def run_mobile_scraper(overrides=None):
+    cfg = load_config(overrides)
     
-    # Use Mobile Profile ID
-    cfg["user_id"] = cfg["mobile_user_id"] 
+    # Use Mobile Profile ID (unless overridden in load_config)
+    if not overrides or "user_id" not in overrides:
+         cfg["user_id"] = cfg["mobile_user_id"] 
+         
+    _enrich_cfg_with_account_info(cfg)
+         
     # Override debug dump file for mobile
     cfg["debug_dump_file"] = "mobile_debug_dump.jsonl"
     
@@ -189,7 +212,11 @@ def run_mobile_scraper():
                 time.sleep(3)
                 print(f"✅ Navigated to: {page.url}")
             else:
-                print(f"✅ Already on Facebook")
+                print(f"✅ Already on Facebook. Refreshing feed...")
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except:
+                    page.goto("https://m.facebook.com/", wait_until="domcontentloaded")
         except Exception as e:
             print(f"⚠️ Navigation error: {e}")
             # Try to continue anyway if page is still alive
@@ -261,6 +288,12 @@ def run_mobile_scraper():
                         result = classifier.classify_image(str(media_path))
                         vertical = result.get("vertical", "Unknown")
                         confidence = result.get("confidence", 0.0)
+                        is_whitelist = result.get("is_whitelist", False)
+
+                        # Белый список — сразу пропускаем
+                        if is_whitelist:
+                            print(f"   🚫 Белый список: «{vertical}» ({confidence:.0%}) — пропускаем")
+                            return True, vertical, confidence, False
 
                         # Check if vertical matches filter
                         filter_verticals = cfg.get("filter_verticals", [])
@@ -282,9 +315,15 @@ def run_mobile_scraper():
                             result = classifier.classify_image(str(frame_path))
                             vertical = result.get("vertical", "Unknown")
                             confidence = result.get("confidence", 0.0)
+                            is_whitelist = result.get("is_whitelist", False)
 
                             # Clean up temporary frame
                             frame_path.unlink()
+
+                            # Белый список — сразу пропускаем
+                            if is_whitelist:
+                                print(f"   🚫 Белый список: «{vertical}» ({confidence:.0%}) — пропускаем")
+                                return True, vertical, confidence, False
 
                             # Check if vertical matches filter
                             filter_verticals = cfg.get("filter_verticals", [])
@@ -309,7 +348,7 @@ def run_mobile_scraper():
             
             # Double check: if ad_label is "Organic" or missing, skip immediately
             # This relies on the JS-side filtering update
-            if ad_data.get("ad_label") != "Sponsored":
+            if ad_data.get("ad_label") not in ("Sponsored", "Gesponsord", "Sponsorlu"):
                  print(f"   ⚠️  Skipping organic post (safety check)")
                  return
             
@@ -364,37 +403,47 @@ def run_mobile_scraper():
             # Download media with unique ID
             media_files = []
             if cfg["download_media"] and (image_urls or video_url):
-                # Convert to format expected by save_media_for_ad
                 media_files = save_media_for_ad(
                     image_urls,
                     [video_url] if video_url else [],
                     None,  # no DASH on mobile
                     cfg,
-                    ad_id=ad_id, # Use unique ID
+                    ad_id=ad_id,
                     request_ctx=context.request,
                 )
-            
-            # Resolve landing URL (like desktop)
+
+            # ── ШАГ 1: Классификация картинки (ДО посещения ссылки) ──────────────
+            should_send, vertical, confidence, matched_filter = should_send_ad(ad_data, media_files, cfg, classifier)
+
+            # Если классификатор включён и объявление НЕ подошло — выбрасываем
+            if classifier and cfg.get("classify_images") and not matched_filter:
+                conf_val = confidence if confidence is not None else 0.0
+                print(f"      ⏭  Пропускаем: «{vertical}» ({conf_val:.0%}) не в фильтре или ниже порога 65%")
+                return
+
+            conf_val = confidence if confidence is not None else 0.0
+            print(f"      ✅ Вертикаль: «{vertical}» ({conf_val:.0%}) — переходим по ссылке")
+
+            # ── ШАГ 2: Резолвим ссылку ──────────────────────────────────────────
             visited_url = link or ""
             final_external = ""
             vstatus = ""
             verr = ""
-            
+
             if link:
-                print(f"      🔗 Found ad link: {link[:100]}")
+                print(f"      🔗 Ad link: {link[:100]}")
             if post_link:
-                print(f"      🔗 Found post link: {post_link[:100]}")
-            
+                print(f"      🔗 Post link: {post_link[:100]}")
+
             # Handle both desktop (l.facebook.com) and mobile (lm.facebook.com) redirects
             if link and ("/l.php" in link.lower() and ("l.facebook.com" in link or "lm.facebook.com" in link)):
-                # Resolve redirect
                 print(f"      🔄 Resolving redirect...")
                 info = resolve_lphp_to_external_url(context, link, timeout_ms=20000)
                 final_external = (info.get("external_url") or "").strip()
                 vstatus = info.get("status") or ""
                 verr = info.get("error") or ""
                 if final_external:
-                    print(f"      ✅ Resolved to: {final_external[:100]}")
+                    print(f"      ✅ Resolved: {final_external[:100]}")
                 else:
                     print(f"      ⚠️  Resolution failed: {vstatus} {verr}")
             else:
@@ -402,22 +451,53 @@ def run_mobile_scraper():
                     final_external = link
                     vstatus = "direct_external"
                     print(f"      ✅ Direct external link")
+                elif link and "." in link and not is_facebookish(link) and not link.startswith("http") and "/" not in link.split(".")[0]:
+                    final_external = f"https://{link}"
+                    vstatus = "domain_converted"
+                    print(f"      ✅ Converted domain: {final_external}")
                 else:
                     vstatus = "no_external_link"
-            
+
+            # ── ШАГ 3: Авторегистрация (только для прошедших фильтр) ────────────
+            reg_email = "-"
+            reg_password = "-"
+            reg_status = "-"
+
+            if final_external and cfg.get("auto_register", False):
+                try:
+                    print(f"      🤖 Авторег на: {final_external[:50]}...")
+                    reg_result = try_auto_register(context, final_external, timeout=30000)
+
+                    if reg_result.get("success"):
+                        reg_email = reg_result.get("email")
+                        reg_password = reg_result.get("password")
+                        reg_status = "Success"
+                        print(f"      ✅ Авторег успешен! {reg_email} : {reg_password}")
+                    elif reg_result.get("error"):
+                        reg_status = f"Failed: {reg_result['error']}"
+                        print(f"      ⚠️  Авторег не удался: {reg_result['error']}")
+                    else:
+                        reg_status = "Attempted"
+                        print(f"      ℹ️  Авторег выполнен")
+                except Exception as e:
+                    print(f"      ❌ Авторег — исключение: {e}")
+                    reg_status = "Error"
+            elif final_external:
+                print(f"      ℹ️  Авторег отключён")
+
             # Update destination_link with resolved external URL
             if final_external:
                 destination_link = final_external
             elif destination_link == "-" and text_link and text_link != "-":
                 destination_link = text_link
-            
+
             # Build ads library URL (fallback)
             ads_library_url = ""
             if page_name and page_name != "Unknown":
                 from urllib.parse import quote
                 encoded_name = quote(page_name)
                 ads_library_url = f"https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&q={encoded_name}&search_type=page&media_type=all"
-            
+
             # Build final ad object
             ad = {
                 "ad_id": ad_id,
@@ -440,48 +520,41 @@ def run_mobile_scraper():
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "source": "mobile_dom",
                 "ad_label": ad_data.get("ad_label", ""),
-                # Add normalized fields for Telegram
                 "clean_text": clean_text,
                 "text_link": text_link,
                 "post_link": post_link,
                 "destination_link": destination_link,
+                "reg_email": reg_email,
+                "reg_password": reg_password,
+                "reg_status": reg_status,
+                "ai_vertical": vertical,
+                "ai_confidence": confidence,
+                "matched_filter": matched_filter,
             }
-            
-            collected += 1
-            
-            # Save to file BEFORE classification (like desktop)
-            # with open(cfg["output_file"], "a", encoding="utf-8") as f:
-            #     f.write(json.dumps(ad, ensure_ascii=False) + "\n")
-            
-            should_send, vertical, confidence, matched_filter = should_send_ad(ad, media_files, cfg, classifier)
 
-            if should_send:
-                # Add AI classification info
-                ad["ai_vertical"] = vertical
-                ad["ai_confidence"] = confidence
-                ad["matched_filter"] = matched_filter
-                
-                # Fix confidence formatting for NoneType
-                conf_val = confidence if confidence is not None else 0.0
-                
-                print(f"   🔥 FOUND (DOM): {page_name} | {vertical} ({conf_val:.0%}){ ' ✅ MATCHED FILTER' if matched_filter else ''}")
-                if destination_link and destination_link != "-":
-                    print(f"      🔗 Link: {destination_link}")
+            collected += 1
+
+            print(f"   🔥 FOUND (DOM): {page_name} | {vertical} ({conf_val:.0%}) ✅ MATCHED")
+            if destination_link and destination_link != "-":
+                print(f"      🔗 Link: {destination_link}")
+
+            # ── ШАГ 4: Сохранить и отправить в Telegram ─────────────────────────
+            with open(cfg["output_file"], "a", encoding="utf-8") as f:
+                f.write(json.dumps(ad, ensure_ascii=False) + "\n")
+
+            if cfg["telegram_send"]:
+                tg_key = telegram_dedupe_key(ad)
+                if tg_key and tg_key in tg_sent_keys:
+                    print("      ⏩ Уже отправлено в Telegram (дедупликация)")
                 else:
-                    print(f"      (No links found)")
-                
-                if cfg["telegram_send"]:
-                    # Check duplication before sending
-                    tg_key = telegram_dedupe_key(ad)
-                    if tg_key and tg_key in tg_sent_keys:
-                        print("      ⏩ Already sent to Telegram (Dedupe)")
+                    if send_ad_to_telegram(cfg, ad, media_files):
+                        print("      🚀 Отправлено в Telegram")
+                        tg_sent_count += 1
+                        if tg_key:
+                            tg_sent_keys.add(tg_key)
                     else:
-                        # CRITICAL FIX: Pass 'ad' object, NOT 'ad_data'
-                        if send_ad_to_telegram(cfg, ad, media_files):
-                            print("      🚀 Sent to Telegram")
-                            tg_sent_count += 1
-                            if tg_key:
-                                tg_sent_keys.add(tg_key)
+                        print("      ❌ Ошибка отправки в Telegram")
+
 
         def slim(obj, depth=5, max_list=10, max_keys=70):
             if depth <= 0:
@@ -694,44 +767,77 @@ def run_mobile_scraper():
         # Start GraphQL listener (for debugging and fallback)
         page.on("response", handle_response)
 
-        for i in range(cfg["scroll_count"]):
-            print(f"📜 Scroll {i+1}...")
-            human_idle(page, cfg)
-            human_scroll(page, cfg)
-            time.sleep(random.uniform(2.0, 4.0))
-            
-            # PRIMARY METHOD: Extract ads from DOM after each scroll
-            print("   🔍 Extracting ads from DOM...")
-            
-            # Check console logs from JavaScript
-            console_listener = lambda msg: print(f"      [Browser] {msg.text}")
-            page.on("console", console_listener)
-            
-            try:
-                ads_data = extract_ads_via_js(page, debug_all_posts=False)
-                print(f"      [Python] JavaScript returned {len(ads_data)} ads")
-            except Exception as e:
-                print(f"   ⚠️  DOM extraction error: {e}")
-                ads_data = [] # Ensure ads_data is defined even on error
-            
-            if ads_data:
-                print(f"   ✅ Found {len(ads_data)} ad(s) via DOM")
-                for ad_data_item in ads_data: # Renamed to avoid conflict with ads_data list
-                    try:
-                        process_ad_from_dom(ad_data_item)
-                    except Exception as e:
-                        print(f"   ⚠️  Error processing ad: {e}")
-            else:
-                print("   ℹ️  No ads found via DOM on this scroll")
-            
-            # Remove console listener
-            page.remove_listener("console", console_listener)
+        PAGE_REFRESH_INTERVAL_MINUTES = 25
+        last_reload_time = time.time()
+        cycle = 0
 
-        stop_listen = True
         try:
-            page.off("response", handle_response)
-        except Exception:
-            pass
+            while True:
+                cycle += 1
+                print(f"\n🔁 Cycle #{cycle} started...")
+
+                for i in range(cfg["scroll_count"]):
+                    print(f"📜 Scroll {i+1}...")
+                    human_idle(page, cfg)
+                    human_scroll(page, cfg)
+                    time.sleep(random.uniform(2.0, 4.0))
+
+                    # Random like (6% chance per scroll — anti-bot humanization)
+                    if cfg.get("like_enabled", True) and random.random() < cfg.get("like_chance", 0.06):
+                        human_like_post(page, cfg)
+
+                    # PRIMARY METHOD: Extract ads from DOM after each scroll
+                    print("   🔍 Extracting ads from DOM...")
+
+                    # Check console logs from JavaScript
+                    console_listener = lambda msg: print(f"      [Browser] {msg.text}")
+                    page.on("console", console_listener)
+
+                    try:
+                        ads_data = extract_ads_via_js(page, debug_all_posts=False)
+                        print(f"      [Python] JavaScript returned {len(ads_data)} ads")
+                    except Exception as e:
+                        print(f"   ⚠️  DOM extraction error: {e}")
+                        ads_data = []
+
+                    if ads_data:
+                        print(f"   ✅ Found {len(ads_data)} ad(s) via DOM")
+                        for ad_data_item in ads_data:
+                            try:
+                                process_ad_from_dom(ad_data_item)
+                            except Exception as e:
+                                print(f"   ⚠️  Error processing ad: {e}")
+                    else:
+                        print("   ℹ️  No ads found via DOM on this scroll")
+
+                    # Remove console listener
+                    page.remove_listener("console", console_listener)
+
+                # Check if 25 minutes have passed → reload page
+                elapsed_min = (time.time() - last_reload_time) / 60
+                if elapsed_min >= PAGE_REFRESH_INTERVAL_MINUTES:
+                    print(f"\n🔄 {int(elapsed_min)} min passed — reloading page...")
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=60000)
+                    except Exception:
+                        try:
+                            page.goto("https://m.facebook.com/", wait_until="domcontentloaded", timeout=60000)
+                        except Exception as e:
+                            print(f"⚠️ Reload failed: {e}")
+                    last_reload_time = time.time()
+                    time.sleep(random.uniform(5, 10))
+                    print("✅ Page reloaded. Continuing...")
+                else:
+                    time.sleep(random.uniform(3, 6))
+
+        except KeyboardInterrupt:
+            print("\n👋 Stopped by KeyboardInterrupt")
+        finally:
+            stop_listen = True
+            try:
+                page.off("response", handle_response)
+            except Exception:
+                pass
 
         print(f"🏁 Done. Saved total: {collected}")
         print(f"🧪 Debug saved to: {cfg['debug_dump_file']}")
@@ -741,4 +847,16 @@ def run_mobile_scraper():
 
 
 if __name__ == "__main__":
-    run_mobile_scraper()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", type=str, help="AdsPower Profile ID")
+    parser.add_argument("--mobile", action="store_true", help="Force mobile mode")
+    args = parser.parse_args()
+    
+    overrides = {}
+    if args.profile:
+        overrides["mobile_user_id"] = args.profile
+    if args.mobile:
+        overrides["mobile_mode"] = True
+        
+    run_mobile_scraper(overrides)

@@ -15,7 +15,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
         // --- Helper: Clean text ---
         function cleanText(text) {
             if (!text) return "";
-            return text.replace(/Sponsored/gi, '')
+            return text.replace(/Sponsored|Gesponsord|Sponsorlu/gi, '')
                        .replace(/Like\\s*·\\s*Comment\\s*·\\s*Share/gi, '')
                        .replace(/\\d+\\s*(min|mins|hour|hours|day|days|h|m|d|w)\\s*(ago)?/gi, '')
                        .replace(/\\d+\\s*Like[s]?/gi, '')
@@ -38,7 +38,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                         if (processedContainers.has(container)) continue;
                         
                         const containerText = container.innerText || "";
-                        const hasSponsored = /Sponsored/i.test(containerText);
+                        const hasSponsored = /Sponsored|Gesponsord|Sponsorlu/i.test(containerText);
                         
                         // STRICT FILTER: If it doesn't say "Sponsored", it is NOT an ad.
                         if (!hasSponsored) continue;
@@ -51,7 +51,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                         const articles = container.querySelectorAll('article');
                         if (articles.length > 0) {
                             console.log(`[JS] Found ${articles.length} article elements in MContainer`);
-                            postContainers = Array.from(articles).filter(art => /Sponsored/i.test(art.innerText || ""));
+                            postContainers = Array.from(articles).filter(art => /Sponsored|Gesponsord|Sponsorlu/i.test(art.innerText || ""));
                         }
                         
                         // Strategy B: If no articles, look for direct children with "Sponsored"
@@ -60,7 +60,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                             console.log(`[JS] Checking ${directChildren.length} direct children for "Sponsored"`);
                             postContainers = directChildren.filter(child => {
                                 const text = child.innerText || "";
-                                return /Sponsored/i.test(text) && text.length > 50; // Has content, not just label
+                                return /Sponsored|Gesponsord|Sponsorlu/i.test(text) && text.length > 50; // Has content, not just label
                             });
                         }
                         
@@ -99,7 +99,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                                 const spans = textArea.querySelectorAll('span[data-action-id], span.rtl-ignore');
                                 for (const span of spans) {
                                     const text = (span.innerText || '').trim();
-                                    if (text && text.length > 1 && text.length < 100 && !/^sponsored$/i.test(text)) {
+                                    if (text && text.length > 1 && text.length < 100 && !/^(sponsored|gesponsord)$/i.test(text)) {
                                         adData.page_name = text;
                                         break;
                                     }
@@ -127,7 +127,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                                 const txt = (textArea.innerText || '').trim();
                                 
                                 if (txt === adData.page_name || txt.length < 10) continue;
-                                if (/^(Like|Comment|Share|Sponsored|See more|Learn more)$/i.test(txt)) continue;
+                                if (/^(Like|Comment|Share|Sponsored|Gesponsord|Sponsorlu|See more|Learn more)$/i.test(txt)) continue;
                                 if (/^\d+\s*(Like|Comment|Share)s?$/i.test(txt)) continue;
                                 
                                 if (txt.length > postText.length) {
@@ -166,12 +166,12 @@ def extract_ads_via_js(page, debug_all_posts=False):
                         const hasSponsoredLabel = Array.from(container.querySelectorAll('span, a, div'))
                             .some(el => {
                                 const style = window.getComputedStyle(el);
-                                return (el.innerText === 'Sponsored' && style.display !== 'none') ||
-                                       (el.getAttribute('aria-label') === 'Sponsored');
+                                return ((el.innerText === 'Sponsored' || el.innerText === 'Gesponsord' || el.innerText === 'Sponsorlu') && style.display !== 'none') ||
+                                       (el.getAttribute('aria-label') === 'Sponsored' || el.getAttribute('aria-label') === 'Gesponsord' || el.getAttribute('aria-label') === 'Sponsorlu');
                             });
                         
                         const containerText = container.innerText || "";
-                        const hasSponsoredText = /Sponsored/i.test(containerText);
+                        const hasSponsoredText = /Sponsored|Gesponsord|Sponsorlu/i.test(containerText);
                         
                         // Stricter check for desktop to avoid false positives
                         // STRICT FILTER: If it doesn't say "Sponsored", it is NOT an ad.
@@ -193,7 +193,7 @@ def extract_ads_via_js(page, debug_all_posts=False):
                         const strongTags = container.querySelectorAll('strong, h2, h3, h4, span.nc684nl6'); 
                         for (const el of strongTags) {
                             const t = (el.innerText || '').trim();
-                            if (t && t.length > 1 && t.length < 100 && !/^sponsored$/i.test(t)) {
+                            if (t && t.length > 1 && t.length < 100 && !/^(sponsored|gesponsord)$/i.test(t)) {
                                 adData.page_name = t;
                                 break;
                             }

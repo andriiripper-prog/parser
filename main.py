@@ -15,17 +15,37 @@ except ImportError:
 
 from ad_classifier import AdImageClassifier
 from adspower import get_ws_url
+from auto_register import try_auto_register # NEW
 from config import load_config
-from facebook_links import is_facebookish, pick_target_link_for_visit, resolve_lphp_to_external_url
+from facebook_links import is_facebookish, pick_target_link_for_visit, resolve_lphp_to_external_url, pick_post_page_redirect
 from graphql_parser import parse_graphql_payload, payload_looks_sponsored
-from human import human_idle, human_scroll
+from human import human_idle, human_scroll, human_like_post
 from media import save_media_for_ad
 from story_extract import extract_feed_ads
 from telegram_client import send_ad_to_telegram, telegram_dedupe_key
 
 
-def run():
-    cfg = load_config()
+def _enrich_cfg_with_account_info(cfg):
+    """Read accounts.yaml and inject geo + name into cfg based on current user_id."""
+    try:
+        import yaml
+        accounts_file = Path(__file__).parent / "accounts.yaml"
+        if accounts_file.exists():
+            with open(accounts_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            for acc in (data.get("accounts") or []):
+                if acc.get("id") == cfg.get("user_id"):
+                    cfg["account_geo"] = acc.get("geo", "canada")
+                    cfg["account_name"] = acc.get("name", "")
+                    cfg["account_id"] = acc.get("id", "")
+                    break
+    except Exception as e:
+        print(f"⚠️ Could not load account geo info: {e}")
+
+
+def run(overrides=None):
+    cfg = load_config(overrides)
+    _enrich_cfg_with_account_info(cfg)
 
     ws = get_ws_url(cfg)
     if not ws:
@@ -45,6 +65,12 @@ def run():
 
         if "facebook.com" not in page.url:
             page.goto("https://www.facebook.com/")
+        else:
+            print("🔄 Refreshing feed...")
+            try:
+                page.reload()
+            except:
+                page.goto("https://www.facebook.com/")
 
         print("🚀 Started. Listening GraphQL responses...")
         time.sleep(random.uniform(6, 10))
@@ -91,20 +117,26 @@ def run():
             return None
 
         def should_send_ad(ad, media_files, cfg, classifier):
-            """Check if ad matches target verticals and mark it"""
+            """Check if ad matches target verticals based on image OCR only"""
             if not classifier or not cfg.get("classify_images"):
                 return True, None, None, False  # no classification, send all
 
             if not media_files:
-                return True, None, None, False  # no media, but still send
+                return True, None, None, False  # no image — skip classification
 
-            # Classify first image
+            # Classify first image using OCR only (no ad text)
             for media_path in media_files:
                 if str(media_path).lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                     try:
                         result = classifier.classify_image(str(media_path))
                         vertical = result.get("vertical", "Unknown")
                         confidence = result.get("confidence", 0.0)
+                        is_whitelist = result.get("is_whitelist", False)
+
+                        # Белый список — сразу пропускаем
+                        if is_whitelist:
+                            print(f"   🚫 Белый список: «{vertical}» ({confidence:.0%}) — пропускаем")
+                            return True, vertical, confidence, False
 
                         # Check if vertical matches filter
                         filter_verticals = cfg.get("filter_verticals", [])
@@ -126,9 +158,15 @@ def run():
                             result = classifier.classify_image(str(frame_path))
                             vertical = result.get("vertical", "Unknown")
                             confidence = result.get("confidence", 0.0)
+                            is_whitelist = result.get("is_whitelist", False)
 
                             # Clean up temporary frame
                             frame_path.unlink()
+
+                            # Белый список — сразу пропускаем
+                            if is_whitelist:
+                                print(f"   🚫 Белый список: «{vertical}» ({confidence:.0%}) — пропускаем")
+                                return True, vertical, confidence, False
 
                             # Check if vertical matches filter
                             filter_verticals = cfg.get("filter_verticals", [])
@@ -209,8 +247,10 @@ def run():
                             )
                         debug_dumps += 1
                     continue
-
-                for ad in ads:
+                
+                print(f"   📦 extract_feed_ads returned {len(ads)} ads")
+                for ads_idx, ad in enumerate(ads):
+                    print(f"   [Ad {ads_idx+1}/{len(ads)}] page={ad.get('page_name', 'N/A')[:30]}, text_len={len(ad.get('text', '')) or 0}, urls={len(ad.get('urls', []))}") 
                     urls = ad.get("urls") or []
                     image_urls = ad.get("image_urls") or []
                     video_urls = ad.get("video_urls") or []
@@ -265,7 +305,24 @@ def run():
                             request_ctx=context.request,
                         )
 
-                    # resolve landing
+                    # ── ШАГ 1: Классификация картинки ─────────────────────────────────
+                    # Делаем это ДО посещения ссылки — не тратим время на нерелевантные объявления
+                    should_send, vertical, confidence, matched_filter = should_send_ad(ad, media_files, cfg, classifier)
+
+                    # Добавляем метаданные классификации
+                    ad["ai_vertical"] = vertical
+                    ad["ai_confidence"] = confidence
+                    ad["matched_filter"] = matched_filter
+
+                    # Если классификатор включён и объявление НЕ подошло — пропускаем
+                    if classifier and cfg.get("classify_images") and not matched_filter:
+                        print(f"      ⏭  Пропускаем: вертикаль «{vertical}» ({confidence:.0%}) не в фильтре")
+                        collected += 1
+                        continue
+
+                    print(f"      ✅ Вертикаль: «{vertical}» ({confidence:.0%}) — переходим по ссылке")
+
+                    # ── ШАГ 2: Резолвим ссылку ────────────────────────────────────────
                     target_link = pick_target_link_for_visit(ad)
                     visited_url = target_link or ""
                     final_external = ""
@@ -284,11 +341,42 @@ def run():
                         else:
                             vstatus = "no_external_link"
 
+                    # ── ШАГ 3: Авторегистрация (только для объявлений из фильтра) ─────
+                    reg_email = "-"
+                    reg_password = "-"
+                    reg_status = "-"
+
+                    if final_external and cfg.get("auto_register", False):
+                        try:
+                            print(f"      🤖 Авторег на: {final_external[:50]}...")
+                            reg_result = try_auto_register(context, final_external, timeout=30000)
+
+                            if reg_result.get("success"):
+                                reg_email = reg_result.get("email")
+                                reg_password = reg_result.get("password")
+                                reg_status = "Success"
+                                print(f"      ✅ Авторег успешен! {reg_email} : {reg_password}")
+                            elif reg_result.get("error"):
+                                reg_status = f"Failed: {reg_result['error']}"
+                                print(f"      ⚠️  Авторег не удался: {reg_result['error']}")
+                            else:
+                                reg_status = "Attempted"
+                                print(f"      ℹ️  Авторег выполнен")
+                        except Exception as e:
+                            print(f"      ❌ Авторег — исключение: {e}")
+                            reg_status = "Error"
+                    elif final_external:
+                        print(f"      ℹ️  Авторег отключён")
+
                     ad["visited_url"] = visited_url
                     ad["final_external_url"] = final_external
                     ad["visit_status"] = vstatus
                     ad["visit_error"] = verr
                     ad["visited_at"] = datetime.now(timezone.utc).isoformat()
+
+                    ad["reg_email"] = reg_email
+                    ad["reg_password"] = reg_password
+                    ad["reg_status"] = reg_status
 
                     ad["media_files"] = media_files
                     ad["captured_at"] = datetime.now(timezone.utc).isoformat()
@@ -297,21 +385,44 @@ def run():
                     with open(cfg["output_file"], "a", encoding="utf-8") as f:
                         f.write(json.dumps(ad, ensure_ascii=False) + "\n")
 
-                    # AI Classification check
-                    should_send, vertical, confidence, matched_filter = should_send_ad(ad, media_files, cfg, classifier)
+                    # ── ШАГ 4: Отправка в Telegram ────────────────────────────────────
+                    # Pre-fill destination_link and post_link
+                    if not ad.get("destination_link"):
+                        urls = ad.get("urls") or []
+                        post_url, _page_url, redirect_url, external_url = pick_post_page_redirect(urls)
 
-                    # Add vertical metadata
-                    ad["ai_vertical"] = vertical
-                    ad["ai_confidence"] = confidence
-                    ad["matched_filter"] = matched_filter
+                        final_ext = (ad.get("final_external_url") or "").strip()
+                        if final_ext and final_ext.startswith("http"):
+                            ad["destination_link"] = final_ext
+                        elif external_url and external_url.startswith("http"):
+                            ad["destination_link"] = external_url
+                        elif redirect_url and redirect_url.startswith("http"):
+                            ad["destination_link"] = redirect_url
+                        else:
+                            for u in urls:
+                                if isinstance(u, str) and u.startswith("http") and not is_facebookish(u):
+                                    ad["destination_link"] = u
+                                    break
+
+                        if not ad.get("destination_link"):
+                            ad["destination_link"] = "-"
+
+                    if not ad.get("post_link"):
+                        urls = ad.get("urls") or []
+                        post_url, _page_url, redirect_url, external_url = pick_post_page_redirect(urls)
+                        ad["post_link"] = post_url or (ad.get("ads_library_url") or "-")
 
                     tg_key = telegram_dedupe_key(ad)
                     if tg_key and tg_key in tg_sent:
-                        pass
+                        print("      ⏩ Уже отправлено в Telegram (дедупликация)")
                     else:
                         if tg_key:
                             tg_sent.add(tg_key)
-                        send_ad_to_telegram(cfg, ad, media_files)
+                        print(f"      📤 Отправка в Telegram...")
+                        if send_ad_to_telegram(cfg, ad, media_files):
+                            print(f"      🚀 Отправлено в Telegram")
+                        else:
+                            print(f"      ❌ Ошибка отправки в Telegram")
 
                     collected += 1
 
@@ -319,19 +430,16 @@ def run():
                     ad_id_out = ad_id or "no-id"
                     url_out = ad.get("ads_library_url") or url_key or dash_video_url
                     text_out = ((ad.get("text") or "")[:60]).replace("\\n", " ")
-                    
-                    # Show vertical and filter status
+
                     if vertical:
                         vertical_info = f" | {vertical} ({confidence:.0%})"
-                        if matched_filter:
-                            filter_flag = " ✅ MATCHED FILTER"
-                        else:
-                            filter_flag = ""
+                        filter_flag = " ✅ MATCHED" if matched_filter else ""
                     else:
                         vertical_info = ""
                         filter_flag = ""
-                    
+
                     print(f"   🔥 FOUND: {name} | {ad_id_out}{vertical_info}{filter_flag} | {url_out or text_out}")
+
 
         def handle_response(response):
             try:
@@ -345,17 +453,33 @@ def run():
 
         page.on("response", handle_response)
 
-        for i in range(cfg["scroll_count"]):
-            print(f"📜 Scroll {i+1}...")
-            human_idle(page, cfg)
-            human_scroll(page, cfg)
-            time.sleep(random.uniform(2.0, 4.0))
+        cycle = 0
 
-        stop_listen = True
         try:
-            page.off("response", handle_response)
-        except Exception:
-            pass
+            while True:
+                cycle += 1
+                print(f"\n🔁 Cycle #{cycle} started...")
+
+                for i in range(cfg["scroll_count"]):
+                    print(f"📜 Scroll {i+1}...")
+                    human_idle(page, cfg)
+                    human_scroll(page, cfg)
+                    time.sleep(random.uniform(2.0, 4.0))
+
+                    # Random like (6% chance per scroll — anti-bot humanization)
+                    if cfg.get("like_enabled", True) and random.random() < cfg.get("like_chance", 0.06):
+                        human_like_post(page, cfg)
+
+                time.sleep(random.uniform(3, 6))
+
+        except KeyboardInterrupt:
+            print("\n👋 Stopped by KeyboardInterrupt")
+        finally:
+            stop_listen = True
+            try:
+                page.off("response", handle_response)
+            except Exception:
+                pass
 
         print(f"🏁 Done. Saved total: {collected}")
         print(f"🧪 Debug saved to: {cfg['debug_dump_file']}")
@@ -364,4 +488,13 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", type=str, help="AdsPower Profile ID")
+    args = parser.parse_args()
+    
+    overrides = {}
+    if args.profile:
+        overrides["user_id"] = args.profile
+        
+    run(overrides)
