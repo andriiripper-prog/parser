@@ -56,10 +56,11 @@ DEFAULT_CONFIG = {
         "Government Payouts & Allowances",
         "Financial Secrets & Wealth Exposé",
         "Crypto & Investment Offers",
+        "Financial Advertorial & Lead Gen Bait",
     ],
-    "min_vertical_confidence": 0.57,   # >= 57% — принимаем
+    "min_vertical_confidence": 0.51,   # >= 51% — принимаем
     "classifier_model": "valhalla/distilbart-mnli-12-1",
-    "ocr_languages": ["en", "ru"],
+    "ocr_languages": ["en", "ru", "tr", "fr", "de", "nl"],
 
 
 

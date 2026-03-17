@@ -61,7 +61,22 @@ def run(overrides=None):
         print("⏳ Connecting to AdsPower CDP...")
         browser = p.chromium.connect_over_cdp(ws)
         context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
+        
+        page = None
+        for attempt in range(15):
+            if context.pages:
+                page = context.pages[0]
+                break
+            try:
+                page = context.new_page()
+                break
+            except Exception as e:
+                print(f"⏳ Waiting for browser to be ready for new page ({attempt+1}/15): {e}")
+                time.sleep(1)
+                
+        if not page:
+            print("❌ Failed to get or create a page after 15 seconds")
+            return
 
         if "facebook.com" not in page.url:
             page.goto("https://www.facebook.com/")

@@ -168,29 +168,40 @@ def run_mobile_scraper(overrides=None):
         browser = p.chromium.connect_over_cdp(ws)
         context = browser.contexts[0]
         
-        # Find the correct page (not DevTools)
+        # Find the correct page (not DevTools) with a retry loop
         page = None
-        if context.pages:
-            # Look for Facebook page first
-            for p in context.pages:
-                url = p.url
-                if "facebook.com" in url:
-                    page = p
-                    break
-            
-            # If no Facebook page, take first non-devtools page
-            if not page:
+        for attempt in range(15):
+            if context.pages:
+                # Look for Facebook page first
                 for p in context.pages:
-                    url = p.url
-                    if not url.startswith("devtools://"):
+                    if "facebook.com" in p.url:
                         page = p
                         break
-            
-            # Last resort: take first page
-            if not page:
-                page = context.pages[0]
-        else:
-            page = context.new_page()
+                
+                # If no Facebook page, take first non-devtools page
+                if not page:
+                    for p in context.pages:
+                        if not p.url.startswith("devtools://"):
+                            page = p
+                            break
+                
+                # Last resort: take first page
+                if not page and context.pages:
+                    page = context.pages[0]
+                    
+            if page:
+                break
+                
+            try:
+                page = context.new_page()
+                break
+            except Exception as e:
+                print(f"⏳ Waiting for browser to be ready for new page ({attempt+1}/15): {e}")
+                time.sleep(1)
+                
+        if not page:
+            print("❌ Failed to get or create a page after 15 seconds")
+            return
 
         # Navigate to Facebook (www.facebook.com) as requested
         # Browser should handle mobile view redirection if needed based on User-Agent

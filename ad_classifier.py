@@ -115,6 +115,24 @@ class AdImageClassifier:
             "enorme winsten verborgen erfenis testament juridisch document notaris financiële maagd "
             "geheim bankcomplot economische crisis waarheid onthuld"
         ),
+        "Financial Advertorial & Lead Gen Bait": (
+            "canada in shock shocking revelation this changes everything politician banned "
+            "celebrity exposed secret method banned video they don't want you to see "
+            "news article style advertorial financial funnel lead generation bait click "
+            "gold silver bullion investment opportunity exclusive discovery wealth secret "
+            "politician money hidden loophole government hiding banking insider tip "
+            "kanada şok içinde şoke eden ifşa her şeyi değiştiriyor yasaklanan politikacı "
+            "ünlü ifşa gizli yöntem yasaklı video görmelerini istemiyorlar "
+            "haber makalesi tarzı finansal huni potansiyel müşteri oluşturma yemi tıklama "
+            "altın gümüş külçe yatırım fırsatı gizli keşif servet "
+            "le canada sous le choc révélation choquante ça change tout politicien banni "
+            "célébrité exposée méthode secrète vidéo bannie ils ne veulent pas que vous voyiez "
+            "style article de presse funnel financier génération de leads appât au clic "
+            "or argent lingot opportunité d'investissement découverte exclusive secret richesse "
+            "canada in shock schokkende onthulling dit verandert alles politicus verboden "
+            "beroemdheid ontmaskerd geheime methode verboden video ze willen niet dat je dit ziet "
+            "nieuwsartikel stijl advertorial financiële funnel leadgeneratie clickbait goud zilver"
+        ),
         "Crypto & Investment Offers": (
             "cryptocurrency platform trading bot automated investment passive income "
             "multiply savings financial independence crypto scheme get rich quick "
@@ -192,6 +210,60 @@ class AdImageClassifier:
             "bağış toplama açlık krizi gıda paketi bir aileyi doyur kış yardımı çocukları koruyun "
             "yetim acil müdahale hastane desteği tıbbi yardım küresel kriz Ramazan etkisi Zekat Sadaka "
             "Gazze Yemen Afrika UNICEF Kızılhaç gönüllü topluluk desteği hayırsever"
+        ),
+        "IGNORE: Government Services (Legit)": (
+            "government service official public service renewal reminder renew reminders "
+            "license renewal id renewal health card renewal registration update account notice "
+            "service portal provincial service state service citizen services official website "
+            "book appointment manage documents verify identity reminders today "
+            "serviceontario ontario ca ontario.ca ministry public office "
+            "resmi kamu hizmeti devlet hizmeti yenileme hatırlatıcısı lisans yenileme "
+            "kimlik yenileme sağlık kartı yenileme kayıt güncelleme resmi web sitesi vatandaş hizmetleri "
+            "service officiel service public rappel de renouvellement renouveler permis carte santé "
+            "mise à jour inscription portail officiel services aux citoyens "
+            "officiële overheidsdienst publieke dienst verlengingsherinnering rijbewijs verlengen "
+            "gezondheidskaart verlengen registratie bijwerken officieel portaal burgerdiensten"
+        ),
+        "IGNORE: Corporate Training & Events": (
+            "corporate training training centre workshop seminar conference leadership "
+            "organizational development organization development executive program "
+            "study visit delegation certificate professional development manager managers "
+            "business training international training strategic leadership event venue "
+            "training bangkok corporate training bangkok bangkok training centre ctb "
+            "kurumsal eğitim eğitim merkezi seminer konferans liderlik organizasyonel gelişim "
+            "çalıştay sertifika profesyonel gelişim yönetici eğitimi stratejik liderlik "
+            "formation en entreprise centre de formation séminaire conférence leadership "
+            "développement organisationnel visite d'étude certificat développement professionnel "
+            "zakelijke training trainingscentrum seminar conferentie leiderschap "
+            "organisatieontwikkeling studiereis certificaat professionele ontwikkeling"
+        ),
+        "IGNORE: E-commerce Platforms & Store Builders": (
+            "shopify ecommerce e-commerce online store store builder webshop website builder "
+            "merchant merchants sell online start business checkout inventory products catalog "
+            "small business retail platform entrepreneur entrepreneurship business blog "
+            "shopify blog shopify app shopify store "
+            "e-ticaret çevrimiçi mağaza mağaza kurucu web mağazası site oluşturucu satıcı "
+            "ürün kataloğu çevrimiçi satış küçük işletme perakende platformu girişimcilik "
+            "commerce électronique boutique en ligne créateur de boutique marchand vendre en ligne "
+            "catalogue produits petite entreprise plateforme retail entrepreneuriat "
+            "e-commerce online winkel winkelbouwer handelaar producten catalogus kleine onderneming"
+        ),
+        "IGNORE: Official Organizations & Institutions": (
+            "official organization institution ministry department agency authority "
+            "training institute public office embassy chamber association board council "
+            "municipality regional office province administration education centre "
+            "resmi kuruluş kurum bakanlık daire ajans otorite enstitü birlik konsey "
+            "organisation officielle institution ministère département agence autorité institut "
+            "association conseil bureau public "
+            "officiële organisatie instelling ministerie agentschap autoriteit instituut raad"
+        ),
+        "IGNORE: Automotive & Dealership": (
+            "car cars auto vehicle dealership dealer showroom pickup truck van suv "
+            "used car new car test drive engine transmission financing vehicle stock "
+            "luxio toyota daihatsu mitsubishi honda suzuki nissan "
+            "araba oto araç bayi galeri kamyonet suv test sürüşü ikinci el sıfır araç "
+            "voiture auto véhicule concessionnaire showroom pick-up suv essai routier "
+            "auto voertuig dealer showroom pick-up bestelwagen suv"
         ),
         "Other": (
             "general advertisement regular promotion product e-commerce standard banner "
